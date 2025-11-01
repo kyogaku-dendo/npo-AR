@@ -11,7 +11,11 @@ const CameraView: React.FC = () => {
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
 
-  const [cameraMode, setCameraMode] = useState<"user" | "environment">("user"); // 📸 内外カメ切替
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const [cameraMode, setCameraMode] = useState<"user" | "environment">(
+    isMobile ? "environment" : "user"
+  );
+
   const [facePos, setFacePos] = useState<{ x: number; y: number } | null>(null);
   const [faceScale, setFaceScale] = useState<number>(100);
   const [handVisible, setHandVisible] = useState(false);
@@ -19,10 +23,9 @@ const CameraView: React.FC = () => {
   const [isPreview, setIsPreview] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
 
-  // カメラセットアップ
+
   const setupCamera = async (mode: "user" | "environment") => {
     if (videoRef.current?.srcObject) {
-      // 既存ストリーム停止
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach((t) => t.stop());
     }
@@ -108,7 +111,6 @@ const CameraView: React.FC = () => {
         srcY = (vh - srcH) / 2;
       }
 
-      // 映像描画のみ
       ctx.clearRect(0, 0, cw, ch);
       ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, cw, ch);
 
@@ -132,7 +134,6 @@ const CameraView: React.FC = () => {
       }
 
       setHandVisible(handResult.landmarks && handResult.landmarks.length > 0);
-
       requestAnimationFrame(renderLoop);
     };
 
@@ -150,9 +151,8 @@ const CameraView: React.FC = () => {
       running = false;
       window.removeEventListener("resize", resizeCanvasToWindow);
     };
-  }, [cameraMode]); // 👈 カメラ切替時に再初期化
+  }, [cameraMode]);
 
-  // 📸 シャッター
   const takePhoto = async () => {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
@@ -175,7 +175,6 @@ const CameraView: React.FC = () => {
   };
 
   const toggleCamera = async () => {
-    // 👇 内外カメラ切替
     setCameraMode((prev) => (prev === "user" ? "environment" : "user"));
   };
 
@@ -194,10 +193,10 @@ const CameraView: React.FC = () => {
     <div
       style={{
         position: "fixed",
-        top: 0,
-        left: 0,
+        inset: 0,
         width: "100vw",
-        height: "100vh",
+        height: "100dvh", // 💡 Safari/Chrome対応
+        minHeight: "100svh",
         overflow: "hidden",
         backgroundColor: "black",
       }}
@@ -207,8 +206,7 @@ const CameraView: React.FC = () => {
         ref={canvasRef}
         style={{
           position: "absolute",
-          top: 0,
-          left: 0,
+          inset: 0,
           width: "100%",
           height: "100%",
           objectFit: "cover",
@@ -231,7 +229,7 @@ const CameraView: React.FC = () => {
         />
       )}
 
-      {/* 📸 シャッターボタン */}
+      {/* 📸 ボタン */}
       {!isPreview && (
         <>
           <button
@@ -249,7 +247,6 @@ const CameraView: React.FC = () => {
               cursor: "pointer",
             }}
           />
-          {/* 🔄 カメラ切替ボタン */}
           <button
             onClick={toggleCamera}
             style={{
@@ -304,6 +301,7 @@ const CameraView: React.FC = () => {
                 padding: "10px 20px",
                 borderRadius: "8px",
                 fontWeight: "bold",
+                color: "black",
               }}
             >
               戻る
