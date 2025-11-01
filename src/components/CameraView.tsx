@@ -1,313 +1,343 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   FilesetResolver,
-  HandLandmarker,
   FaceLandmarker,
+  HandLandmarker,
 } from "@mediapipe/tasks-vision";
-import "./CameraView.css";
-
-type Overlay = {
-  id: number;
-  src: string;
-  name: string;
-  x: number;
-  y: number;
-  scale: number;
-  visible: boolean;
-};
 
 const CameraView: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const captureCanvasRef = useRef<HTMLCanvasElement>(null);
-  const handLandmarkerRef = useRef<HandLandmarker | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
+  const handLandmarkerRef = useRef<HandLandmarker | null>(null);
 
-  const [overlay, setOverlay] = useState<Overlay>({
-    id: 1,
-    name: "んぽたそ",
-    src: "/npo.png",
-    x: window.innerWidth / 2,
-    y: window.innerHeight / 2,
-    scale: 1.0,
-    visible: false,
-  });
+  const [cameraMode, setCameraMode] = useState<"user" | "environment">("user"); // 📸 内外カメ切替
+  const [facePos, setFacePos] = useState<{ x: number; y: number } | null>(null);
+  const [faceScale, setFaceScale] = useState<number>(100);
+  const [handVisible, setHandVisible] = useState(false);
+  const [photoData, setPhotoData] = useState<string | null>(null);
+  const [isPreview, setIsPreview] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
 
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // カメラセットアップ
+  const setupCamera = async (mode: "user" | "environment") => {
+    if (videoRef.current?.srcObject) {
+      // 既存ストリーム停止
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach((t) => t.stop());
+    }
 
-  // === カメラ起動 ===
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        facingMode: mode,
+      },
+    });
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+  };
+
   useEffect(() => {
-    const startCamera = async () => {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "user",
-          width: { ideal: window.innerWidth },
-          height: { ideal: window.innerHeight },
-        },
-      });
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    };
-    startCamera();
+    let running = true;
 
-    return () => {
-      const tracks = (videoRef.current?.srcObject as MediaStream)?.getTracks();
-      tracks?.forEach((t) => t.stop());
-    };
-  }, []);
-
-  // === MediaPipe 初期化 ===
-  useEffect(() => {
-    const initModels = async () => {
+    const setupMediapipe = async () => {
       const vision = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
       );
 
-      const [handLandmarker, faceLandmarker] = await Promise.all([
-        HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-          },
-          runningMode: "VIDEO",
-          numHands: 1,
-        }),
-        FaceLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-          },
-          runningMode: "VIDEO",
-          numFaces: 1,
-        }),
-      ]);
+      faceLandmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        },
+        runningMode: "VIDEO",
+      });
 
-      handLandmarkerRef.current = handLandmarker;
-      faceLandmarkerRef.current = faceLandmarker;
-
-      if (videoRef.current) videoRef.current.onloadeddata = () => detectLoop();
+      handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        },
+        runningMode: "VIDEO",
+      });
     };
 
-    initModels();
+    const resizeCanvasToWindow = () => {
+      if (!canvasRef.current) return;
+      const canvas = canvasRef.current;
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
 
-    const detectLoop = async () => {
+    const renderLoop = async () => {
+      if (
+        !running ||
+        !videoRef.current ||
+        !faceLandmarkerRef.current ||
+        !handLandmarkerRef.current ||
+        !canvasRef.current
+      )
+        return;
+
       const video = videoRef.current;
-      if (!video || !handLandmarkerRef.current || !faceLandmarkerRef.current) {
-        requestAnimationFrame(detectLoop);
-        return;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const cw = canvas.width;
+      const ch = canvas.height;
+
+      const videoAspect = vw / vh;
+      const canvasAspect = cw / ch;
+
+      let srcX = 0,
+        srcY = 0,
+        srcW = vw,
+        srcH = vh;
+      if (videoAspect > canvasAspect) {
+        srcW = vh * canvasAspect;
+        srcX = (vw - srcW) / 2;
+      } else {
+        srcH = vw / canvasAspect;
+        srcY = (vh - srcH) / 2;
       }
-      if (video.videoWidth === 0) {
-        requestAnimationFrame(detectLoop);
-        return;
+
+      // 映像描画のみ
+      ctx.clearRect(0, 0, cw, ch);
+      ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, cw, ch);
+
+      const nowInMs = Date.now();
+      const faceResult = await faceLandmarkerRef.current.detectForVideo(video, nowInMs);
+      const handResult = await handLandmarkerRef.current.detectForVideo(video, nowInMs);
+
+      if (faceResult.faceLandmarks?.length) {
+        const landmarks = faceResult.faceLandmarks[0];
+        const nose = landmarks[1];
+        const chin = landmarks[152];
+        const forehead = landmarks[10];
+        const faceHeight = Math.abs(chin.y - forehead.y);
+
+        const adjX = (nose.x * vw - srcX) / srcW;
+        const adjY = (nose.y * vh - srcY) / srcH;
+        const x = adjX * cw;
+        const y = adjY * ch;
+        setFacePos({ x, y });
+        setFaceScale(faceHeight * ch * 1.2);
       }
 
-      const now = Date.now();
-      const handResult = await handLandmarkerRef.current.detectForVideo(video, now);
-      const faceResult = await faceLandmarkerRef.current.detectForVideo(video, now);
+      setHandVisible(handResult.landmarks && handResult.landmarks.length > 0);
 
-      let isPalm = false;
-      let newX = overlay.x;
-      let newY = overlay.y;
-      let newScale = overlay.scale;
-
-      // === 手のひら判定 ===
-      if (handResult.landmarks?.[0]) {
-        isPalm = detectPalmFacingCamera(handResult.landmarks[0]);
-      }
-
-      // === 顔位置に基づいてんぽたそ配置 ===
-      if (faceResult.faceLandmarks?.[0]) {
-        const face = faceResult.faceLandmarks[0];
-        const nose = face[1];
-        const left = face[234];
-        const right = face[454];
-      
-        if (nose && left && right && videoRef.current) {
-          const video = videoRef.current;
-          const videoW = video.videoWidth;
-          const videoH = video.videoHeight;
-      
-          // ==== ビデオの実サイズ → 画面上の表示範囲 ====
-          const rect = video.getBoundingClientRect();
-      
-          // object-fit: cover のズレ補正
-          const videoAspect = videoW / videoH;
-          const viewAspect = rect.width / rect.height;
-          let drawX = rect.x;
-          let drawY = rect.y;
-          let scaleX = rect.width / videoW;
-          let scaleY = rect.height / videoH;
-      
-          if (videoAspect > viewAspect) {
-            // 横が広い（左右トリミング）
-            const scaledVideoW = videoH * viewAspect;
-            const offsetX = (videoW - scaledVideoW) / 2;
-            scaleX = rect.width / scaledVideoW;
-            drawX = rect.x - offsetX * scaleX;
-          } else if (videoAspect < viewAspect) {
-            // 縦が広い（上下トリミング）
-            const scaledVideoH = videoW / viewAspect;
-            const offsetY = (videoH - scaledVideoH) / 2;
-            scaleY = rect.height / scaledVideoH;
-            drawY = rect.y - offsetY * scaleY;
-          }
-      
-          // ==== 顔座標を画面座標へ変換 ====
-          const toScreen = (p: any) => ({
-            x: drawX + p.x * videoW * scaleX,
-            y: drawY + p.y * videoH * scaleY,
-          });
-      
-          const nosePos = toScreen(nose);
-          const leftPos = toScreen(left);
-          const rightPos = toScreen(right);
-      
-          const faceWidthPx = Math.abs(rightPos.x - leftPos.x);
-          const placeRight = nosePos.x < window.innerWidth / 2;
-          const offsetX = placeRight ? faceWidthPx * 1.3: -faceWidthPx * 1.3;
-      
-          newX = nosePos.x + offsetX;
-          newY = nosePos.y - faceWidthPx; // 少し上に
-          newScale = Math.min(Math.max(faceWidthPx / 150, 0.8), 2.0);
-      
-          // 画面外補正
-          newX = Math.min(
-            Math.max(newX, (150 * newScale) / 2),
-            window.innerWidth - (150 * newScale) / 2
-          );
-          newY = Math.min(
-            Math.max(newY, (150 * newScale) / 2),
-            window.innerHeight - (150 * newScale) / 2
-          );
-        }
-      }
-      
-
-      // スムーズに移動
-      setOverlay((prev) => ({
-        ...prev,
-        visible: isPalm,
-        x: lerp(prev.x, newX, 0.25),
-        y: lerp(prev.y, newY, 0.25),
-        scale: lerp(prev.scale, newScale, 0.2),
-      }));
-
-      animationFrameRef.current = requestAnimationFrame(detectLoop);
+      requestAnimationFrame(renderLoop);
     };
 
-    return () => cancelAnimationFrame(animationFrameRef.current!);
-  }, []);
+    const init = async () => {
+      await setupCamera(cameraMode);
+      await setupMediapipe();
+      resizeCanvasToWindow();
+      window.addEventListener("resize", resizeCanvasToWindow);
+      renderLoop();
+    };
 
-  // === 手のひら判定 ===
-  const detectPalmFacingCamera = (hand: any[]): boolean => {
-    const zValues = hand.map((p) => p.z);
-    const zRange = Math.max(...zValues) - Math.min(...zValues);
-    const avgZ = zValues.reduce((a, b) => a + b, 0) / zValues.length;
-    return avgZ < 0 && zRange < 0.15;
-  };
+    init();
 
-  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+    return () => {
+      running = false;
+      window.removeEventListener("resize", resizeCanvasToWindow);
+    };
+  }, [cameraMode]); // 👈 カメラ切替時に再初期化
 
-  // === 撮影処理 ===
-  const handleCapture = () => {
-    if (!videoRef.current || !captureCanvasRef.current) return;
-
-    const video = videoRef.current;
-    const canvas = captureCanvasRef.current;
+  // 📸 シャッター
+  const takePhoto = async () => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    // カメラ映像を描画
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // んぽたそを描画
-    if (overlay.visible) {
+    if (handVisible && facePos) {
       const img = new Image();
-      img.src = overlay.src;
-      img.onload = () => {
-        const scale = 150 * overlay.scale;
-        const drawX = (overlay.x / window.innerWidth) * canvas.width;
-        const drawY = (overlay.y / window.innerHeight) * canvas.height;
-        ctx.drawImage(img, drawX - scale / 2, drawY - scale / 2, scale, scale);
-        setPreviewImage(canvas.toDataURL("image/png"));
-      };
-    } else {
-      setPreviewImage(canvas.toDataURL("image/png"));
+      img.src = "/npo.png";
+      await new Promise((resolve) => (img.onload = resolve));
+      const w = faceScale;
+      const h = faceScale;
+      ctx.drawImage(img, facePos.x - w / 2, facePos.y - h * 1.5, w, h);
     }
+
+    const dataUrl = canvas.toDataURL("image/png");
+    setPhotoData(dataUrl);
+    setIsPreview(true);
+    setIsSaved(false);
   };
 
-  // === 保存 ===
-  const handleSave = () => {
-    if (!previewImage) return;
-    const a = document.createElement("a");
-    a.href = previewImage;
-    a.download = `npocamera_${Date.now()}.png`;
-    a.click();
+  const toggleCamera = async () => {
+    // 👇 内外カメラ切替
+    setCameraMode((prev) => (prev === "user" ? "environment" : "user"));
   };
 
-  // === 共有 ===
-  const handleShare = async () => {
-    if (!previewImage) return;
-    try {
-      const res = await fetch(previewImage);
-      const blob = await res.blob();
-      const file = new File([blob], "npo.png", { type: "image/png" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          title: "んぽたそカメラ📸",
-          text: "んぽたそカメラで撮ったよ！",
-          files: [file],
-        });
-      } else {
-        const tweetUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(
-          "#んぽたそカメラで撮ったよ"
-        )}`;
-        window.open(tweetUrl, "_blank");
-      }
-    } catch (err) {
-      console.error("共有に失敗:", err);
-    }
+  const closePreview = () => setIsPreview(false);
+  const handleSave = () => setIsSaved(true);
+
+  const handleShareToX = () => {
+    if (!photoData) return;
+    const text = encodeURIComponent("#んぽたそといっしょ");
+    const url = encodeURIComponent(window.location.href);
+    const shareUrl = `https://twitter.com/intent/tweet?text=${text}&url=${url}`;
+    window.open(shareUrl, "_blank");
   };
 
   return (
-    <div className="camera-container">
-      <video ref={videoRef} autoPlay playsInline muted className="camera-video" />
-      <canvas ref={captureCanvasRef} style={{ display: "none" }} />
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        backgroundColor: "black",
+      }}
+    >
+      <video ref={videoRef} style={{ display: "none" }} />
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+        }}
+      />
 
-      {/* === んぽたそ === */}
-      {overlay.visible && (
+      {/* 顔の上に npo.png */}
+      {handVisible && facePos && (
         <img
-          src={overlay.src}
-          alt={overlay.name}
-          className="overlay-image"
+          src="/npo.png"
+          alt="popup"
           style={{
-            top: `${overlay.y}px`,
-            left: `${overlay.x}px`,
-            width: `${150 * overlay.scale}px`,
-            transform: "translate(-50%, -50%)",
+            position: "absolute",
+            left: `${facePos.x - faceScale / 2}px`,
+            top: `${facePos.y - faceScale * 1.5}px`,
+            width: `${faceScale}px`,
+            height: `${faceScale}px`,
+            transition: "opacity 0.3s",
           }}
         />
       )}
 
-      {/* === 撮影ボタン === */}
-      {!previewImage && (
-        <div className="camera-ui">
-          <button className="capture-btn" onClick={handleCapture}></button>
-        </div>
+      {/* 📸 シャッターボタン */}
+      {!isPreview && (
+        <>
+          <button
+            onClick={takePhoto}
+            style={{
+              position: "absolute",
+              bottom: "40px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "80px",
+              height: "80px",
+              borderRadius: "50%",
+              border: "4px solid white",
+              backgroundColor: "rgba(255,255,255,0.2)",
+              cursor: "pointer",
+            }}
+          />
+          {/* 🔄 カメラ切替ボタン */}
+          <button
+            onClick={toggleCamera}
+            style={{
+              position: "absolute",
+              bottom: "60px",
+              right: "30px",
+              background: "rgba(255,255,255,0.3)",
+              border: "2px solid white",
+              borderRadius: "50%",
+              width: "60px",
+              height: "60px",
+              fontSize: "10px",
+              color: "white",
+              cursor: "pointer",
+            }}
+          >
+            カメラ切替
+          </button>
+        </>
       )}
 
-      {/* === プレビュー（チェキ風） === */}
-      {previewImage && (
-        <div className="preview-overlay">
-          <div className="preview-frame">
-            <img src={previewImage} alt="preview" />
-            <div className="preview-buttons">
-              <button className="save-btn" onClick={handleSave}>保存</button>
-              <button className="x-btn" onClick={handleShare}>𝕏にポスト</button>
-              <button className="close-btn" onClick={() => setPreviewImage(null)}>戻る</button>
-            </div>
+      {/* 🖼️ プレビュー */}
+      {isPreview && photoData && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(0,0,0,0.9)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "column",
+            zIndex: 20,
+          }}
+        >
+          <img
+            src={photoData}
+            alt="preview"
+            style={{
+              maxWidth: "90%",
+              maxHeight: "80%",
+              borderRadius: "12px",
+              boxShadow: "0 0 20px rgba(255,255,255,0.3)",
+            }}
+          />
+          <div style={{ marginTop: "20px", display: "flex", gap: "12px" }}>
+            <button
+              onClick={closePreview}
+              style={{
+                background: "white",
+                border: "none",
+                padding: "10px 20px",
+                borderRadius: "8px",
+                fontWeight: "bold",
+              }}
+            >
+              戻る
+            </button>
+            <a
+              href={photoData}
+              download="photo.png"
+              onClick={handleSave}
+              style={{
+                background: "#4caf50",
+                color: "white",
+                padding: "10px 20px",
+                borderRadius: "8px",
+                textDecoration: "none",
+                fontWeight: "bold",
+              }}
+            >
+              画像を保存
+            </a>
+            <button
+              onClick={handleShareToX}
+              disabled={!isSaved}
+              style={{
+                background: isSaved ? "#1DA1F2" : "gray",
+                color: "white",
+                padding: "10px 20px",
+                borderRadius: "8px",
+                fontWeight: "bold",
+                opacity: isSaved ? 1 : 0.6,
+                cursor: isSaved ? "pointer" : "not-allowed",
+              }}
+            >
+              Xで共有
+            </button>
           </div>
         </div>
       )}
