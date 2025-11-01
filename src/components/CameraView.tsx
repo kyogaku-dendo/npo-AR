@@ -21,7 +21,7 @@ const CameraView: React.FC = () => {
   const captureCanvasRef = useRef<HTMLCanvasElement>(null);
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number | null>(null);
 
   const [overlay, setOverlay] = useState<Overlay>({
     id: 1,
